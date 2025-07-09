@@ -13,6 +13,8 @@ By the end of this workshop, you'll have a serverless system that:
 
 ## ✨ What You'll Use
 
+Here’s the tech stack powering your GitLab-to-DynamoDB pipeline:
+
 * GitLab (Personal Access Token)
 * AWS Lambda
 * DynamoDB (w/ TTL)
@@ -26,7 +28,8 @@ By the end of this workshop, you'll have a serverless system that:
 
 | Step | What You Do              | What You See              |
 | ---- | ------------------------ | ------------------------- |
-| 1    | Get GitLab token         | ✅ Token test success      |
+| 0    | Create a new Git repo    | ✅ Project initialized     |
+| 1    | Get GitLab token + .env  | ✅ Token test success      |
 | 2    | Pulumi up                | ✅ DynamoDB + IAM created  |
 | 3    | Deploy Lambda            | ✅ CloudWatch logs         |
 | 4    | Save MRs                 | ✅ Items in DynamoDB       |
@@ -35,38 +38,89 @@ By the end of this workshop, you'll have a serverless system that:
 
 ---
 
-## 🔐 Step 1: Get and Test Your GitLab Token
+## 🆕 Step 0: Create a New Git Repository
 
-### 1.1 Generate Token
-
-* Go to [GitLab > Preferences > Access Tokens](https://gitlab.com/-/profile/personal_access_tokens)
-* Name: `moondawg-workshop`
-* Scopes: ✅ `read_api`
-* Click **Create Token** and **copy it** immediately!
-
-### 1.2 Test It
+Before getting started, create a new repository on either GitHub or GitLab. This will be your project directory for the workshop.
 
 ```bash
-curl --header "PRIVATE-TOKEN: YOUR_TOKEN_HERE" \
-  https://gitlab.com/api/v4/user
+git init gitlab-metrics
+cd gitlab-metrics
+git remote add origin <your-repo-url>
 ```
 
-You should get back JSON with your GitLab user info. If not, check your scopes or token value.
+Create a basic folder structure:
+
+```bash
+mkdir .infrastructure lambda
+```
+
+Create a `.gitignore` file and paste in the following:
+
+```gitignore
+# Environment and config
+.env
+.pulumi/
+
+# Dependencies
+node_modules/
+__pycache__/
+
+# Build artifacts
+*.zip
+
+# System files
+.DS_Store
+```
+
+---
+
+## 🔐 Step 1: Get and Test Your GitLab Token
+
+### 1.1 Generate Token and Create .env
+
+* Go to [GitLab > Preferences > Access Tokens](https://gitlab.com/-/profile/personal_access_tokens)
+* Name: `gitlab-metrics`
+* Scopes: ✅ `read_api`
+* Click **Create Token** and **copy it** immediately!
+* Create a `.env` file at the root of your project:
+
+```env
+GITLAB_TOKEN=your_token_here
+GITLAB_USERNAME=your_gitlab_username_here
+```
+
+### 1.2 Test It Using .env
+
+First load the environment variables:
+
+```bash
+source .env
+```
+
+Then run this test request against the `elite-webapp` project (ID `47813856`):
+
+```bash
+curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  "https://gitlab.com/api/v4/projects/48779531/merge_requests?author_username=$GITLAB_USERNAME&state=merged&updated_after=$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)" \
+  | jq '.[].title'
+```
+
+You should get back an array of merge request JSON objects. If not, check your scopes or token value.
 
 ---
 
 ## 🧬 Step 2: Deploy Infra with Pulumi
 
 ```bash
-cp .env.example .env
-# Fill in GITLAB_TOKEN and USERNAME
-cd infra
+cd .infrastructure
 pulumi stack init dev
 pulumi config set aws:region us-east-1
+pulumi config set gitlabToken $GITLAB_TOKEN
+pulumi config set username $GITLAB_USERNAME
 pulumi up
 ```
 
-### `infra/index.ts`
+### `.infrastructure/index.ts`
 
 ```ts
 import * as aws from '@pulumi/aws';
@@ -156,7 +210,7 @@ new aws.lambda.Permission('moondawg-permission', {
 
 ---
 
-## ✅ Step 3: Deploy & Log Merge Requests
+## ✅ Step 3: Deploy & Log GitLab Merge Requests
 
 1. Write your Lambda logic in `/lambda/index.ts`
 2. Example minimal script:
@@ -179,7 +233,7 @@ export const handler = async () => {
 ```bash
 cd lambda
 zip -r write-lambda.zip .
-cd ../infra
+cd ../.infrastructure
 pulumi up
 ```
 
@@ -251,3 +305,7 @@ pulumi destroy
 * Include project filters
 * Generate dashboard or Slack summary
 * Export to S3 for long-term history
+
+---
+
+This lunch session is going to be a blast.

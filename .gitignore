@@ -1,0 +1,13 @@
+# Environment and config
+.env
+.pulumi/
+
+# Dependencies
+node_modules/
+__pycache__/
+
+# Build artifacts
+*.zip
+
+# System files
+.DS_Store
