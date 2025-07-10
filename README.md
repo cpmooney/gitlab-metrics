@@ -13,7 +13,7 @@ By the end of this workshop, you'll have a serverless system that:
 
 ## ✨ What You'll Use
 
-Here’s the tech stack powering your GitLab-to-DynamoDB pipeline:
+Here's the tech stack powering your GitLab-to-DynamoDB pipeline:
 
 * GitLab (Personal Access Token)
 * AWS Lambda
@@ -30,8 +30,9 @@ Here’s the tech stack powering your GitLab-to-DynamoDB pipeline:
 | ---- | ------------------------ | ------------------------- |
 | 0    | Create a new Git repo    | ✅ Project initialized     |
 | 1    | Get GitLab token + .env  | ✅ Token test success      |
-| 2    | Pulumi up                | ✅ DynamoDB + IAM created  |
-| 3    | Deploy Lambda            | ✅ CloudWatch logs         |
+| 2    | Pulumi setup (no deploy) | ✅ Infrastructure code ready |
+| 3    | Create Lambda & Deploy   | ✅ CloudWatch logs         |
+| 3b   | Inspect AWS resources    | ✅ DynamoDB + IAM created  |
 | 4    | Save MRs                 | ✅ Items in DynamoDB       |
 | 5    | Automate with scheduling | ✅ Lambda runs on schedule |
 | 6    | Destroy resources        | ✅ Clean AWS teardown      |
@@ -107,17 +108,24 @@ curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 
 You should get back an array of merge request JSON objects. If not, check your scopes or token value.
 
+### 1.3 Put these values in the parameter store
+
+This can either be done through the AWS console or via these commands.
+
+```bash
+aws ssm put-parameter --name "/moondawg/gitlab/token" --value "$GITLAB_TOKEN" --type SecureString
+aws ssm put-parameter --name "/moondawg/gitlab/username" --value "$GITLAB_USERNAME" --type String
+```
+
 ---
 
-## 🧬 Step 2: Deploy Infra with Pulumi
+## 🧬 Step 2: Setup Pulumi Infrastructure Code
 
 ```bash
 cd .infrastructure
-pulumi stack init dev
+pulumi new typescript
 pulumi config set aws:region us-east-1
-pulumi config set gitlabToken $GITLAB_TOKEN
-pulumi config set username $GITLAB_USERNAME
-pulumi up
+npm install @pulumi/aws
 ```
 
 ### `.infrastructure/index.ts`
@@ -129,6 +137,10 @@ import * as pulumi from '@pulumi/pulumi';
 const config = new pulumi.Config();
 const region = aws.config.region || 'us-east-1';
 const tableName = 'moondawg-merge-requests';
+
+// Note: GitLab token and username should be manually created in Parameter Store:
+// - /moondawg/gitlab/token (SecureString)
+// - /moondawg/gitlab/username (String)
 
 // DynamoDB table
 const table = new aws.dynamodb.Table(tableName, {
@@ -145,7 +157,7 @@ const table = new aws.dynamodb.Table(tableName, {
 
 // IAM policy for Lambda
 const policy = new aws.iam.Policy('moondawg-lambda-dynamo-policy', {
-  description: 'Allow Lambda to write MRs to DynamoDB',
+  description: 'Allow Lambda to write MRs to DynamoDB and read from Parameter Store',
   policy: pulumi.all([table.name]).apply(([tableName]) =>
     JSON.stringify({
       Version: '2012-10-17',
@@ -157,6 +169,17 @@ const policy = new aws.iam.Policy('moondawg-lambda-dynamo-policy', {
             'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan'
           ],
           Resource: `arn:aws:dynamodb:${region}:*:table/${tableName}`,
+        },
+        {
+          Effect: 'Allow',
+          Action: [
+            'ssm:GetParameter',
+            'ssm:GetParameters'
+          ],
+          Resource: [
+            `arn:aws:ssm:${region}:*:parameter/moondawg/gitlab/token`,
+            `arn:aws:ssm:${region}:*:parameter/moondawg/gitlab/username`
+          ],
         },
       ],
     })
@@ -182,8 +205,8 @@ const lambda = new aws.lambda.Function('moondawg-lambda', {
   handler: 'index.handler',
   environment: {
     variables: {
-      GITLAB_TOKEN: config.require('gitlabToken'),
-      USERNAME: config.require('username'),
+      GITLAB_TOKEN_PARAM: '/moondawg/gitlab/token',
+      USERNAME_PARAM: '/moondawg/gitlab/username',
       DYNAMODB_TABLE_NAME: table.name,
     },
   },
@@ -208,9 +231,11 @@ new aws.lambda.Permission('moondawg-permission', {
 });
 ```
 
+**Note:** Don't run `pulumi up` yet! We need to create the Lambda ZIP file first.
+
 ---
 
-## ✅ Step 3: Deploy & Log GitLab Merge Requests
+## ✅ Step 3: Create Lambda & Deploy Infrastructure
 
 1. Write your Lambda logic in `/lambda/index.ts`
 2. Example minimal script:
@@ -219,7 +244,7 @@ new aws.lambda.Permission('moondawg-permission', {
 import fetch from 'node-fetch';
 
 export const handler = async () => {
-  const res = await fetch('https://gitlab.com/api/v4/merge_requests?state=merged', {
+  const res = await fetch('https://gitlab.com/api/v4/projects/48779531/merge_requests?state=merged', {
     headers: { 'PRIVATE-TOKEN': process.env.GITLAB_TOKEN! },
   });
   const data = await res.json();
@@ -228,16 +253,60 @@ export const handler = async () => {
 };
 ```
 
-3. Zip and redeploy:
+3. Zip and deploy:
 
 ```bash
 cd lambda
 zip -r write-lambda.zip .
 cd ../.infrastructure
-pulumi up
+pulumi up --yes
 ```
 
 ✅ View logs in AWS Console > Lambda > Monitor > CloudWatch Logs
+
+---
+
+## 🔍 Step 3b: Inspect Resources in the AWS Console
+
+After running pulumi up, verify that the infrastructure was provisioned correctly:
+
+✅ **DynamoDB Table**
+
+Navigate to AWS Console > DynamoDB > Tables
+
+Look for a table named `moondawg-merge-requests`
+
+Confirm TTL is enabled on the `ttl` attribute
+
+✅ **IAM Policy & Role**
+
+Go to IAM > Policies, search for `moondawg-lambda-dynamo-policy`
+
+Check that it grants PutItem, Query, Scan, etc. to the correct table AND Parameter Store access
+
+Then go to IAM > Roles, search for `moondawg-lambda-role`
+
+Under Permissions, verify that the policy is attached
+
+✅ **Lambda Function**
+
+Head to AWS Console > Lambda > Functions
+
+Find the function named `moondawg-lambda`
+
+Click into the function to see its environment variables and configuration
+
+Verify the environment variables point to Parameter Store paths
+
+✅ **EventBridge Rule**
+
+Visit EventBridge > Rules, search for `moondawg-schedule`
+
+Ensure it's set to run on a 5-minute interval
+
+Check the target is your Lambda function
+
+Everything should now be wired up! Continue to the next step to add DynamoDB logic to your Lambda function.
 
 ---
 
@@ -248,13 +317,27 @@ Update your handler to write to DynamoDB using AWS SDK v3:
 ```ts
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import fetch from 'node-fetch';
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ssm = new SSMClient({});
+
+const getParameter = async (paramName: string) => {
+  const result = await ssm.send(new GetParameterCommand({
+    Name: paramName,
+    WithDecryption: true
+  }));
+  return result.Parameter?.Value;
+};
 
 export const handler = async () => {
-  const res = await fetch('https://gitlab.com/api/v4/merge_requests?state=merged', {
-    headers: { 'PRIVATE-TOKEN': process.env.GITLAB_TOKEN! },
+  // Get GitLab credentials from Parameter Store
+  const gitlabToken = await getParameter(process.env.GITLAB_TOKEN_PARAM!);
+  const username = await getParameter(process.env.USERNAME_PARAM!);
+
+  const res = await fetch('https://gitlab.com/api/v4/projects/48779531/merge_requests?state=merged', {
+    headers: { 'PRIVATE-TOKEN': gitlabToken! },
   });
   const mrs = await res.json();
 
@@ -273,6 +356,15 @@ export const handler = async () => {
   console.log(`✅ Saved ${mrs.length} MRs`);
   return { statusCode: 200, body: 'Saved' };
 };
+```
+
+Re-zip and redeploy:
+
+```bash
+cd lambda
+zip -r write-lambda.zip .
+cd ../.infrastructure
+pulumi up --yes
 ```
 
 ✅ Run another `pulumi up` and check DynamoDB > Explore Table > Scan
